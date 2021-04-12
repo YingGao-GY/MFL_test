@@ -45,16 +45,16 @@ def func_attention(query, context, gamma1):
     # Get attention
     # (batch x sourceL x ndf)(batch x ndf x queryL)
     # -->batch x sourceL x queryL
-    attn = torch.bmm(contextT, query) # Eq. (7) in AttnGAN paper
+    attn = torch.bmm(contextT, query)  # Eq. (7) in AttnGAN paper
     # --> batch*sourceL x queryL
-    attn = attn.view(batch_size*sourceL, queryL)
+    attn = attn.view(batch_size * sourceL, queryL)
     attn = nn.Softmax()(attn)  # Eq. (8)
 
     # --> batch x sourceL x queryL
     attn = attn.view(batch_size, sourceL, queryL)
     # --> batch*queryL x sourceL
     attn = torch.transpose(attn, 1, 2).contiguous()
-    attn = attn.view(batch_size*queryL, sourceL)
+    attn = attn.view(batch_size * queryL, sourceL)
     #  Eq. (9)
     attn = attn * gamma1
     attn = nn.Softmax()(attn)
@@ -101,7 +101,7 @@ class GlobalAttentionGeneral(nn.Module):
         # -->batch x queryL x sourceL
         attn = torch.bmm(targetT, sourceT)
         # --> batch*queryL x sourceL
-        attn = attn.view(batch_size*queryL, sourceL)
+        attn = attn.view(batch_size * queryL, sourceL)
         if self.mask is not None:
             # batch_size x sourceL --> batch_size*queryL x sourceL
             mask = self.mask.repeat(queryL, 1)
@@ -115,7 +115,40 @@ class GlobalAttentionGeneral(nn.Module):
         # (batch x idf x sourceL)(batch x sourceL x queryL)
         # --> batch x idf x queryL
         weightedContext = torch.bmm(sourceT, attn)
-        weightedContext = weightedContext.view(batch_size, -1, ih, iw)
+        # weightedContext = weightedContext.view(batch_size, -1, ih, iw)
         attn = attn.view(batch_size, -1, ih, iw)
 
         return weightedContext, attn
+
+
+class ChannelAttention(nn.Module):  # channel attention
+    def __init__(self, idf, cdf):
+        super(ChannelAttention, self).__init__()
+        self.conv_context2 = conv1x1(cdf, 64 * 64)
+        self.conv_context3 = conv1x1(cdf, 128 * 128)
+        self.sm = nn.Softmax()
+        self.idf = idf
+
+    def forward(self, weightedContext, context, ih, iw):
+        # weightedContext是经过GlobalAttention之后加权的imge feature
+        # context是wordembs
+        # ih,iw是h_code的height和width
+        batch_size, sourceL = context.size(0), context.size(2)  # batch_size和每个单词的长度
+        sourceC = context.unsqueeze(3)
+
+        if ih == 64:
+            sourceC = self.conv_context2(sourceC).squeeze(3)
+        else:
+            sourceC = self.conv_context3(sourceC).squeeze(3)
+
+        attn_c = torch.bmm(weightedContext, sourceC)
+        attn_c = attn_c.view(batch_size * self.idf, sourceL)
+        attn_c = self.sm(attn_c)
+        attn_c = attn_c.view(batch_size, self.idf, sourceL)
+        attn_c = torch.transpose(attn_c, 1, 2).contiguous()
+
+        weightedContext_c = torch.bmm(sourceC, attn_c)
+        weightedContext_c = torch.transpose(weightedContext_c, 1, 2).contiguous()
+        weightedContext_c = weightedContext_c.view(batch_size, -1, ih, iw)
+
+        return weightedContext_c, attn_c

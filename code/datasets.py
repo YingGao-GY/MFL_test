@@ -3,7 +3,6 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-
 from nltk.tokenize import RegexpTokenizer
 from collections import defaultdict
 
@@ -18,11 +17,12 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import numpy.random as random
+
 if sys.version_info[0] == 2:
     import cPickle as pickle
 else:
     import pickle
-    
+
 
 def prepare_data(data):
     imgs, captions, captions_lens, class_ids, keys = data
@@ -32,7 +32,7 @@ def prepare_data(data):
         torch.sort(captions_lens, 0, True)
 
     real_imgs = []
-    #print(len(imgs))
+    # print(len(imgs))
     for i in range(len(imgs)):
         imgs[i] = imgs[i][sorted_cap_indices]
         if torch.cuda.is_available():
@@ -74,7 +74,7 @@ def get_imgs(img_path, BRANCH_NUM, imsize, bbox=None,
         img = transform(img)
 
     ret = []
-    
+
     for i in range(BRANCH_NUM):
         # print(imsize[i])
         if i < (BRANCH_NUM - 1):
@@ -113,7 +113,7 @@ class TextDataset(data.Dataset):
         split_dir = os.path.join(data_dir, split)
 
         self.filenames, self.captions, self.ixtoword, \
-            self.wordtoix, self.n_words = self.load_text_data(data_dir, split)
+        self.wordtoix, self.n_words = self.load_text_data(data_dir, split)
 
         self.class_id = self.load_class_id(split_dir, len(self.filenames))
         self.number_example = len(self.filenames)
@@ -129,9 +129,10 @@ class TextDataset(data.Dataset):
         df_filenames = \
             pd.read_csv(filepath, delim_whitespace=True, header=None)
         filenames = df_filenames[1].tolist()
-        print('Total filenames: ', len(filenames), filenames[0])
+        print('Total filenames: ', len(filenames), filenames[2])
         #
         filename_bbox = {img_file[:-4]: [] for img_file in filenames}
+        # print(filename_bbox)
         numImgs = len(filenames)
         for i in range(0, numImgs):
             # bbox = [x-left, y-top, width, height]
@@ -139,7 +140,10 @@ class TextDataset(data.Dataset):
 
             key = filenames[i][:-4]
             filename_bbox[key] = bbox
+
         #
+        # print(filename_bbox['001.Black_footed_Albatross/Black_Footed_Albatross_0002_55'])
+        # print(filename_bbox)
         return filename_bbox
 
     def load_captions(self, data_dir, filenames):
@@ -218,17 +222,19 @@ class TextDataset(data.Dataset):
                 ixtoword, wordtoix, len(ixtoword)]
 
     def load_text_data(self, data_dir, split):
-        filepath = os.path.join(data_dir, 'captions.pickle')
+        # filepath = os.path.join(data_dir, 'captions.pickle')
+        filepath = data_dir + '/captions.pickle'
         train_names = self.load_filenames(data_dir, 'train')
-        #print("train_names:", train_names)
+        print("train_names:", train_names)
         test_names = self.load_filenames(data_dir, 'test')
-        #print("test_names:", test_names)
+        print("test_names:", test_names)
         if not os.path.isfile(filepath):
             train_captions = self.load_captions(data_dir, train_names)
             test_captions = self.load_captions(data_dir, test_names)
 
             train_captions, test_captions, ixtoword, wordtoix, n_words = \
                 self.build_dictionary(train_captions, test_captions)
+            # print(os.path.isfile(filepath))
             with open(filepath, 'wb') as f:
                 pickle.dump([train_captions, test_captions,
                              ixtoword, wordtoix], f, protocol=2)
@@ -261,6 +267,7 @@ class TextDataset(data.Dataset):
 
     def load_filenames(self, data_dir, split):
         filepath = '%s/%s/filenames.pickle' % (data_dir, split)
+        # print(filepath)
         if os.path.isfile(filepath):
             with open(filepath, 'rb') as f:
                 filenames = pickle.load(f)
@@ -314,7 +321,6 @@ class TextDataset(data.Dataset):
         new_sent_ix = index * self.embeddings_num + sent_ix
         caps, cap_len = self.get_caption(new_sent_ix)
         return imgs, caps, cap_len, cls_id, key
-
 
     def __len__(self):
         return len(self.filenames)

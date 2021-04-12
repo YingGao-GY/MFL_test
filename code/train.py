@@ -12,6 +12,7 @@ from model import InpaintNet, PatchDiscriminator, RNN_ENCODER, CNN_ENCODER
 from datasets import TextDataset, prepare_data
 from torch.autograd import Variable
 import warnings
+
 warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser()
@@ -56,15 +57,15 @@ train_tf = transforms.Compose([
 ])
 
 dataset_train = TextDataset(args.root, 'train',
-                            base_size=args.base_size, 
+                            base_size=args.base_size,
                             CAPTIONS_PER_IMAGE=args.CAPTIONS_PER_IMAGE,
-                            WORDS_NUM=args.WORDS_NUM, 
+                            WORDS_NUM=args.WORDS_NUM,
                             BRANCH_NUM=args.BRANCH_NUM,
                             transform=train_tf)
 assert dataset_train
 train_set = torch.utils.data.DataLoader(
-        dataset_train, batch_size=args.batch_size,
-        drop_last=True, shuffle=True, num_workers=args.n_threads) 
+    dataset_train, batch_size=args.batch_size,
+    drop_last=True, shuffle=True, num_workers=args.n_threads)
 
 print(len(train_set))
 
@@ -73,6 +74,7 @@ ixtoword_train = dataset_train.ixtoword
 g_model = InpaintNet().to(device)
 pd_model = PatchDiscriminator().to(device)
 l1 = nn.L1Loss().to(device)
+g_model.train()
 
 start_epoch = 0
 g_optimizer_t = torch.optim.Adam(
@@ -90,7 +92,7 @@ if args.resume:
     print('Models restored')
 
 image_encoder = CNN_ENCODER(args.image_size)
-img_encoder_path = '../DAMSMencoders/' + args.dataset + '/image_encoder200.pth'
+img_encoder_path = '../DAMSMencoders/image_encoder200.pth'
 state_dict = torch.load(img_encoder_path, map_location=lambda storage, loc: storage)
 image_encoder.load_state_dict(state_dict)
 for p in image_encoder.parameters():
@@ -99,7 +101,7 @@ print('Load image encoder from:', img_encoder_path)
 image_encoder.eval()
 
 text_encoder = RNN_ENCODER(dataset_train.n_words, nhidden=args.image_size)
-text_encoder_path = '../DAMSMencoders/' + args.dataset + '/text_encoder200.pth'
+text_encoder_path = '../DAMSMencoders/text_encoder200.pth'
 state_dict = torch.load(text_encoder_path, map_location=lambda storage, loc: storage)
 text_encoder.load_state_dict(state_dict)
 for p in text_encoder.parameters():
@@ -110,6 +112,7 @@ text_encoder.eval()
 if use_cuda:
     text_encoder = text_encoder.cuda()
     image_encoder = image_encoder.cuda()
+
 
 def prepare_labels():
     batch_size = args.batch_size
@@ -122,30 +125,31 @@ def prepare_labels():
         match_labels = match_labels.cuda()
 
     return real_labels, fake_labels, match_labels
-    
+
+
 real_labels, fake_labels, match_labels = prepare_labels()
 
+
 def get_mask():
-        
     mask = []
     IMAGE_SIZE = args.image_size
-    
+
     for i in range(args.batch_size):
-        
         q1 = p1 = IMAGE_SIZE // 4
         q2 = p2 = IMAGE_SIZE - IMAGE_SIZE // 4
-            
+
         m = np.zeros((IMAGE_SIZE, IMAGE_SIZE), dtype=np.uint8)
         m[q1:q2 + 1, p1:p2 + 1] = 1
         m = np.expand_dims(m, 0)
         mask.append(m)
-            
+
     mask = np.array(mask)
     mask = torch.from_numpy(mask)
 
     if use_cuda:
         mask = mask.float().cuda()
     return mask
+
 
 nz = 100
 noise = Variable(torch.FloatTensor(args.batch_size, nz))
@@ -154,17 +158,17 @@ if use_cuda:
     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
 
 for i in range(start_epoch, args.max_epoch):
-    
+
     iterator_train = iter(train_set)
     train_step = 0
     num_batches = len(train_set)
     while train_step < num_batches:
-        
+
         train_step = train_step + 1
-    
+
         data_train = iterator_train.next()
         imgs, captions, cap_lens, class_ids, keys = prepare_data(data_train)
-        
+
         hidden = text_encoder.init_hidden(args.batch_size)
         # words_embs: batch_size x nef x seq_len
         # sent_emb: batch_size x nef
@@ -176,66 +180,71 @@ for i in range(start_epoch, args.max_epoch):
         num_words = words_embs.size(2)
         if text_mask.size(1) > num_words:
             text_mask = text_mask[:, :num_words]
-        
+
         img = imgs[-1]
         mask = get_mask()
         masked = img * (1. - mask)
-        
+
         noise.data.normal_(0, 1)
         coarse_result_t, refine_result_t, attn_loss = g_model(masked, mask, noise, sent_emb, words_embs, text_mask)
-         
+
         ################### Text-Image Matching Loss ####################
         region_features, cnn_code = image_encoder(refine_result_t)
-        w_loss0, w_loss1, _ = words_loss(region_features, words_embs, match_labels, cap_lens, class_ids, args.batch_size, use_cuda)
+        w_loss0, w_loss1, _ = words_loss(region_features, words_embs, match_labels, cap_lens, class_ids,
+                                         args.batch_size, use_cuda)
         w_loss = (w_loss0 + w_loss1) * 1.0
 
         s_loss0, s_loss1 = sent_loss(cnn_code, sent_emb, match_labels, class_ids, args.batch_size, use_cuda)
         s_loss = (s_loss0 + s_loss1) * 1.0
-        
+
         matching_loss = w_loss + s_loss
-        
+
         ################### Text Inpainting Loss ####################
         pg_loss_t, pd_loss_t = calc_gan_loss(pd_model, refine_result_t, img)
-    
-        recon_loss_t = l1(coarse_result_t, img) + l1(refine_result_t, img) + l1(refine_result_t * attn_loss, img * attn_loss)
+
+        recon_loss_t = l1(coarse_result_t, img) + l1(refine_result_t, img) + l1(refine_result_t * attn_loss,
+                                                                                img * attn_loss)
         gan_loss_t = pg_loss_t
-        total_loss_t = 1*recon_loss_t + 0.002*gan_loss_t + 0.001*matching_loss
+        total_loss_t = 1 * recon_loss_t + 0.002 * gan_loss_t + 0.001 * matching_loss
         g_optimizer_t.zero_grad()
         total_loss_t.backward(retain_graph=True)
         g_optimizer_t.step()
-    
+
         pd_optimizer_t.zero_grad()
         pd_loss_t.backward()
         pd_optimizer_t.step()
-        
+
         num_save_interval = num_batches * i + train_step
-    
+
         if num_save_interval % args.save_model_interval == 0 or (i + 1) == args.max_epoch:
             torch.save(g_model.state_dict(), f'{args.save_dir}/ckpt/G_{num_save_interval}.pth')
             print("model saved.")
-    
+
         if num_save_interval % args.log_interval == 0:
             writer.add_scalar('g_loss_t/matching_loss', matching_loss.item(), num_save_interval)
             writer.add_scalar('g_loss_t/recon_loss_t', recon_loss_t.item(), num_save_interval)
             writer.add_scalar('g_loss_t/gan_loss_t', gan_loss_t.item(), num_save_interval)
             writer.add_scalar('g_loss_t/total_loss_t', total_loss_t.item(), num_save_interval)
             writer.add_scalar('d_loss_t/pd_loss_t', pd_loss_t.item(), num_save_interval)
-            
+
             print('\n', num_save_interval)
-            
+
             print('g_loss_t/total_loss_t', total_loss_t.item())
             print('g_loss_t/recon_loss_t', recon_loss_t.item())
             print('g_loss_t/matching_loss', matching_loss.item())
             print('d_loss_t/pd_loss_t', pd_loss_t.item())
-    
+
+
         def denorm(x):
-            out = (x + 1) / 2 # [-1,1] -> [0,1]
+            out = (x + 1) / 2  # [-1,1] -> [0,1]
             return out.clamp_(0, 1)
+
+
         if num_save_interval % args.vis_interval == 0:
             ims = torch.cat([masked, refine_result_t, img], dim=3)
             ims_train = ims.add(1).div(2).mul(255).clamp(0, 255).byte()
             ims_train = ims_train[0].permute(1, 2, 0).data.cpu().numpy()
-            
+
             cap_back = Image.new('RGB', (ims_train.shape[1], 30), (255, 255, 255))
             cap = captions[0].data.cpu().numpy()
             sentence = []
@@ -248,12 +257,12 @@ for i in range(start_epoch, args.max_epoch):
             draw = ImageDraw.Draw(cap_back)
             draw.text((0, 10), sentence, (0, 0, 0))
             cap_back = np.array(cap_back)
-            
+
             ims_text = np.concatenate([ims_train, cap_back], 0)
-            ims_out = Image.fromarray(ims_text)   
-            fullpath = '%s/epoch%d_iteration%d.png' % (args.training_image, i+1, num_save_interval)
+            ims_out = Image.fromarray(ims_text)
+            fullpath = '%s/epoch%d_iteration%d.png' % (args.training_image, i + 1, num_save_interval)
             ims_out.save(fullpath)
-            
+
             print("train image saved.")
-      
+
 writer.close()

@@ -1,13 +1,16 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+import numpy as np
 
 from GlobalAttention import GlobalAttentionGeneral as ATT_NET
+from GlobalAttention import ChannelAttention as CHANNEL_NET
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.autograd import Variable
 from torchvision import models
 import torch.utils.model_zoo as model_zoo
 from self_attn import SelfAttention
+
 
 class GLU(nn.Module):
     def __init__(self):
@@ -16,7 +19,7 @@ class GLU(nn.Module):
     def forward(self, x):
         nc = x.size(1)
         assert nc % 2 == 0, 'channels dont divide 2!'
-        nc = int(nc/2)
+        nc = int(nc / 2)
         return x[:, :nc] * F.sigmoid(x[:, nc:])
 
 
@@ -51,6 +54,8 @@ def Block3x3_relu(in_planes, out_planes):
     return block
 
 
+
+
 class ResBlock(nn.Module):
     def __init__(self, channel_num):
         super(ResBlock, self).__init__()
@@ -66,7 +71,8 @@ class ResBlock(nn.Module):
         out = self.block(x)
         out += residual
         return out
-    
+
+
 # ############## Text2Image Encoder-Decoder #######
 class RNN_ENCODER(nn.Module):
     def __init__(self, ntoken, ninput=300, drop_prob=0.5,
@@ -258,7 +264,8 @@ class CNN_ENCODER(nn.Module):
         if features is not None:
             features = self.emb_features(features)
         return features, cnn_code
-    
+
+
 class CA_NET(nn.Module):
     def __init__(self):
         super(CA_NET, self).__init__()
@@ -286,6 +293,7 @@ class CA_NET(nn.Module):
         mu, logvar = self.encode(text_embedding)
         c_code = self.reparametrize(mu, logvar)
         return c_code, mu, logvar
+
 
 class INIT_STAGE_G(nn.Module):
     def __init__(self, ngf, ncf):
@@ -322,13 +330,14 @@ class INIT_STAGE_G(nn.Module):
 
         return out_code64
 
+
 class NEXT_STAGE_G(nn.Module):
     def __init__(self, ngf, nef, ncf):
         super(NEXT_STAGE_G, self).__init__()
         self.gf_dim = ngf
         self.ef_dim = nef
         self.cf_dim = ncf
-        self.num_residual = 3 
+        self.num_residual = 3
         self.define_module()
 
     def _make_layer(self, block, channel_num):
@@ -340,18 +349,25 @@ class NEXT_STAGE_G(nn.Module):
     def define_module(self):
         ngf = self.gf_dim
         self.att = ATT_NET(ngf, self.ef_dim)
-        self.residual = self._make_layer(ResBlock, ngf * 2)
-        self.upsample = upBlock(ngf * 2, ngf)
+        self.channel_att = CHANNEL_NET(ngf,self.ef_dim)
+        self.residual = self._make_layer(ResBlock, ngf * 3)
+        self.upsample = upBlock(ngf * 3, ngf)
 
     def forward(self, h_code, c_code, word_embs, mask):
-        self.att.applyMask(mask) 
-        c_code, att = self.att(h_code, word_embs) 
-        h_c_code = torch.cat((h_code, c_code), 1) 
-        out_code = self.residual(h_c_code)
+        self.att.applyMask(mask)
+        c_code, att = self.att(h_code, word_embs)
+        c_code_channel, att_channel = self.channel_att(c_code, word_embs, h_code.size(2), h_code.size(3))
+        c_code = c_code.view(word_embs.size(0), -1, h_code.size(2), h_code.size(3))
 
-        out_code = self.upsample(out_code) 
+        h_c_code = torch.cat((h_code, c_code), 1)
+        h_c_c_code = torch.cat((h_c_code, c_code_channel), 1)
+        out_code = self.residual(h_c_c_code)
+        out_code = self.upsample(out_code)
 
         return out_code, att
+
+
+
 
 def get_norm(name, out_channels):
     if name == 'batch':
@@ -367,7 +383,7 @@ def get_act(name):
     if name == 'relu':
         activation = nn.ReLU(inplace=True)
     elif name == 'elu':
-        activation == nn.ELU(inplace=True)
+        activation = nn.ELU(inplace=True)
     elif name == 'leaky_relu':
         activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
     elif name == 'tanh':
@@ -377,6 +393,7 @@ def get_act(name):
     else:
         activation = None
     return activation
+
 
 ##################### Generator ##########################
 class CoarseEncodeBlock(nn.Module):
@@ -396,11 +413,12 @@ class CoarseEncodeBlock(nn.Module):
     def forward(self, x):
         return self.encode(x)
 
+
 class CoarseDecodeBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride,
                  normalization=None, activation=None):
         super().__init__()
-        
+
         layers = []
         if activation:
             layers.append(get_act(activation))
@@ -413,6 +431,7 @@ class CoarseDecodeBlock(nn.Module):
     def forward(self, x):
         return self.decode(x)
 
+
 class CoarseNet(nn.Module):
     def __init__(self, c_img=3,
                  norm='instance', act_en='leaky_relu', act_de='relu'):
@@ -421,73 +440,73 @@ class CoarseNet(nn.Module):
         cnum = 64
 
         self.en_1 = nn.Conv2d(c_img, cnum, 4, 2, padding=1)
-        self.en_2 = CoarseEncodeBlock(cnum, cnum*2, 4, 2, normalization=norm, activation=act_en)
-        self.en_3 = CoarseEncodeBlock(cnum*2, cnum*4, 4, 2, normalization=norm, activation=act_en)
-        self.en_4 = CoarseEncodeBlock(cnum*4, cnum*8, 4, 2, normalization=norm, activation=act_en)
-        self.en_5 = CoarseEncodeBlock(cnum*16, cnum*8, 4, 2, normalization=norm, activation=act_en)
-        self.en_6 = CoarseEncodeBlock(cnum*8, cnum*8, 4, 2, normalization=norm, activation=act_en)
-        self.en_7 = CoarseEncodeBlock(cnum*8, cnum*8, 4, 2, normalization=norm, activation=act_en)
-        self.en_8 = CoarseEncodeBlock(cnum*8, cnum*8, 4, 2, activation=act_en)
+        self.en_2 = CoarseEncodeBlock(cnum, cnum * 2, 4, 2, normalization=norm, activation=act_en)
+        self.en_3 = CoarseEncodeBlock(cnum * 2, cnum * 4, 4, 2, normalization=norm, activation=act_en)
+        self.en_4 = CoarseEncodeBlock(cnum * 4, cnum * 8, 4, 2, normalization=norm, activation=act_en)
+        self.en_5 = CoarseEncodeBlock(cnum * 16, cnum * 8, 4, 2, normalization=norm, activation=act_en)
+        self.en_6 = CoarseEncodeBlock(cnum * 8, cnum * 8, 4, 2, normalization=norm, activation=act_en)
+        self.en_7 = CoarseEncodeBlock(cnum * 8, cnum * 8, 4, 2, normalization=norm, activation=act_en)
+        self.en_8 = CoarseEncodeBlock(cnum * 8, cnum * 8, 4, 2, activation=act_en)
 
-        self.de_8 = CoarseDecodeBlock(cnum*8, cnum*8, 4, 2, normalization=norm, activation=act_de)
-        self.de_7 = CoarseDecodeBlock(cnum*8*2, cnum*8, 4, 2, normalization=norm, activation=act_de)
-        self.de_6 = CoarseDecodeBlock(cnum*8*2, cnum*8, 4, 2, normalization=norm, activation=act_de)
-        self.de_5 = CoarseDecodeBlock(cnum*8*2, cnum*8, 4, 2, normalization=norm, activation=act_de)
-        self.de_4 = CoarseDecodeBlock(cnum*8*2, cnum*4, 4, 2, normalization=norm, activation=act_de)
-        self.de_3 = CoarseDecodeBlock(cnum*4*2, cnum*2, 4, 2, normalization=norm, activation=act_de)
-        self.de_2 = CoarseDecodeBlock(cnum*2*2, cnum, 4, 2, normalization=norm, activation=act_de)
+        self.de_8 = CoarseDecodeBlock(cnum * 8, cnum * 8, 4, 2, normalization=norm, activation=act_de)
+        self.de_7 = CoarseDecodeBlock(cnum * 8 * 2, cnum * 8, 4, 2, normalization=norm, activation=act_de)
+        self.de_6 = CoarseDecodeBlock(cnum * 8 * 2, cnum * 8, 4, 2, normalization=norm, activation=act_de)
+        self.de_5 = CoarseDecodeBlock(cnum * 8 * 2, cnum * 8, 4, 2, normalization=norm, activation=act_de)
+        self.de_4 = CoarseDecodeBlock(cnum * 8 * 2, cnum * 4, 4, 2, normalization=norm, activation=act_de)
+        self.de_3 = CoarseDecodeBlock(cnum * 4 * 2, cnum * 2, 4, 2, normalization=norm, activation=act_de)
+        self.de_2 = CoarseDecodeBlock(cnum * 2 * 2, cnum, 4, 2, normalization=norm, activation=act_de)
         self.de_1 = nn.Sequential(
             get_act(act_de),
-            nn.ConvTranspose2d(cnum*2, c_img, 4, 2, padding=1),
+            nn.ConvTranspose2d(cnum * 2, c_img, 4, 2, padding=1),
             get_act('tanh'))
-        
+
         self.ca_net = CA_NET()
         self.h_net1 = INIT_STAGE_G(512, 100)
         self.h_net2 = NEXT_STAGE_G(32, 256, 100)
         self.h_net3 = NEXT_STAGE_G(32, 256, 100)
         self.attn = SelfAttention(512)
-        
+
         self.text_en_1 = nn.Conv2d(32, cnum, 4, 2, padding=1)
-        self.text_en_2 = CoarseEncodeBlock(cnum, cnum*2, 4, 2, normalization=norm, activation=act_en)
-        self.text_en_3 = CoarseEncodeBlock(cnum*2, cnum*4, 4, 2, normalization=norm, activation=act_en)
-        self.text_en_4 = CoarseEncodeBlock(cnum*4, cnum*8, 4, 2, normalization=norm, activation=act_en)
-    
+        self.text_en_2 = CoarseEncodeBlock(cnum, cnum * 2, 4, 2, normalization=norm, activation=act_en)
+        self.text_en_3 = CoarseEncodeBlock(cnum * 2, cnum * 4, 4, 2, normalization=norm, activation=act_en)
+        self.text_en_4 = CoarseEncodeBlock(cnum * 4, cnum * 8, 4, 2, normalization=norm, activation=act_en)
+
     def forward(self, x, z_code, sent_emb, word_embs, text_mask):
-        
+
         ################## Image Encoder 1 ###################
         out_1 = self.en_1(x)
         out_2 = self.en_2(out_1)
         out_3 = self.en_3(out_2)
         out_4 = self.en_4(out_3)
-        
+
         ##################### Attention ######################
         attn_feature = self.attn(out_4, word_embs)
-                
+
         ################### Text 2 Image ######################
         att_maps = []
-        c_code, mu, logvar = self.ca_net(sent_emb) 
+        c_code, mu, logvar = self.ca_net(sent_emb)
 
         h_code1 = self.h_net1(z_code, c_code)
-        h_code2, att1 = self.h_net2(h_code1, c_code, word_embs, text_mask) 
+        h_code2, att1 = self.h_net2(h_code1, c_code, word_embs, text_mask)
         if att1 is not None:
-            att_maps.append(att1)   
-        h_code3, att2 = self.h_net3(h_code2, c_code, attn_feature, text_mask)
+            att_maps.append(att1)
+        h_code3, att2 = self.h_net3(h_code2, c_code, attn_feature , text_mask)
         if att2 is not None:
             att_maps.append(att2)
-            
+
         ################### Text-Image Encoder #################
         text_out_1 = self.text_en_1(h_code3)
         text_out_2 = self.text_en_2(text_out_1)
         text_out_3 = self.text_en_3(text_out_2)
         text_out_4 = self.text_en_4(text_out_3)
-        
+
         ################## Image Encoder 2 ###################
         out_4_t = torch.cat([out_4, text_out_4], 1)
         out_5 = self.en_5(out_4_t)
         out_6 = self.en_6(out_5)
         out_7 = self.en_7(out_6)
         out_8 = self.en_8(out_7)
-        
+
         ##################### Decoder #########################
         dout_8 = self.de_8(out_8)
         dout_8_out_7 = torch.cat([dout_8, out_7], 1)
@@ -504,7 +523,7 @@ class CoarseNet(nn.Module):
         dout_2 = self.de_2(dout_3_out_2)
         dout_2_out_1 = torch.cat([dout_2, out_1], 1)
         dout_1 = self.de_1(dout_2_out_1)
-       
+
         return dout_1, att1, att2
 
 
@@ -537,7 +556,7 @@ class RefineDecodeBlock(nn.Module):
     def __init__(self, in_channels, out_channels,
                  normalization=None, activation=None):
         super().__init__()
-        
+
         layers = []
         if activation:
             layers.append(get_act(activation))
@@ -567,31 +586,31 @@ class RefineNet(nn.Module):
         cnum = 64
 
         self.en_1 = nn.Conv2d(c_in, cnum, 3, 1, padding=1)
-        self.en_2 = RefineEncodeBlock(cnum, cnum*2, normalization=norm, activation=act_en)
-        self.en_3 = RefineEncodeBlock(cnum*2, cnum*4, normalization=norm, activation=act_en)
-        self.en_4 = RefineEncodeBlock(cnum*4, cnum*8, normalization=norm, activation=act_en)
-        self.en_5 = RefineEncodeBlock(cnum*8, cnum*8, normalization=norm, activation=act_en)
-        self.en_6 = RefineEncodeBlock(cnum*8, cnum*8, normalization=norm, activation=act_en)
-        self.en_7 = RefineEncodeBlock(cnum*8, cnum*8, normalization=norm, activation=act_en)
-        self.en_8 = RefineEncodeBlock(cnum*8, cnum*8, normalization=norm, activation=act_en)
+        self.en_2 = RefineEncodeBlock(cnum, cnum * 2, normalization=norm, activation=act_en)
+        self.en_3 = RefineEncodeBlock(cnum * 2, cnum * 4, normalization=norm, activation=act_en)
+        self.en_4 = RefineEncodeBlock(cnum * 4, cnum * 8, normalization=norm, activation=act_en)
+        self.en_5 = RefineEncodeBlock(cnum * 8, cnum * 8, normalization=norm, activation=act_en)
+        self.en_6 = RefineEncodeBlock(cnum * 8, cnum * 8, normalization=norm, activation=act_en)
+        self.en_7 = RefineEncodeBlock(cnum * 8, cnum * 8, normalization=norm, activation=act_en)
+        self.en_8 = RefineEncodeBlock(cnum * 8, cnum * 8, normalization=norm, activation=act_en)
         self.en_9 = nn.Sequential(
             get_act(act_en),
-            nn.Conv2d(cnum*8, cnum*8, 4, 2, padding=1))
+            nn.Conv2d(cnum * 8, cnum * 8, 4, 2, padding=1))
 
         self.de_9 = nn.Sequential(
             get_act(act_de),
-            nn.ConvTranspose2d(cnum*8, cnum*8, 4, 2, padding=1),
-            get_norm(norm, cnum*8))
-        self.de_8 = RefineDecodeBlock(cnum*8*2, cnum*8, normalization=norm, activation=act_de)
-        self.de_7 = RefineDecodeBlock(cnum*8*2, cnum*8, normalization=norm, activation=act_de)
-        self.de_6 = RefineDecodeBlock(cnum*8*2, cnum*8, normalization=norm, activation=act_de)
-        self.de_5 = RefineDecodeBlock(cnum*8*2, cnum*8, normalization=norm, activation=act_de)
-        self.de_4 = RefineDecodeBlock(cnum*8*2, cnum*4, normalization=norm, activation=act_de)
-        self.de_3 = RefineDecodeBlock(cnum*4*2, cnum*2, normalization=norm, activation=act_de)
-        self.de_2 = RefineDecodeBlock(cnum*2*2, cnum, normalization=norm, activation=act_de)
+            nn.ConvTranspose2d(cnum * 8, cnum * 8, 4, 2, padding=1),
+            get_norm(norm, cnum * 8))
+        self.de_8 = RefineDecodeBlock(cnum * 8 * 2, cnum * 8, normalization=norm, activation=act_de)
+        self.de_7 = RefineDecodeBlock(cnum * 8 * 2, cnum * 8, normalization=norm, activation=act_de)
+        self.de_6 = RefineDecodeBlock(cnum * 8 * 2, cnum * 8, normalization=norm, activation=act_de)
+        self.de_5 = RefineDecodeBlock(cnum * 8 * 2, cnum * 8, normalization=norm, activation=act_de)
+        self.de_4 = RefineDecodeBlock(cnum * 8 * 2, cnum * 4, normalization=norm, activation=act_de)
+        self.de_3 = RefineDecodeBlock(cnum * 4 * 2, cnum * 2, normalization=norm, activation=act_de)
+        self.de_2 = RefineDecodeBlock(cnum * 2 * 2, cnum, normalization=norm, activation=act_de)
         self.de_1 = nn.Sequential(
             get_act(act_de),
-            nn.ConvTranspose2d(cnum*2, c_img, 3, 1, padding=1))
+            nn.ConvTranspose2d(cnum * 2, c_img, 3, 1, padding=1))
 
     def forward(self, x1, x2):
         x = torch.cat([x1, x2], 1)
@@ -624,7 +643,7 @@ class RefineNet(nn.Module):
         dout_1 = self.de_1(dout_2_out_1)
 
         return dout_1
-    
+
 
 class CSA(nn.Module):
     def __init__(self):
@@ -640,19 +659,18 @@ class InpaintNet(nn.Module):
 
         self.coarse_t = CoarseNet()
         self.refine_t = RefineNet()
-        
+
         self.weight_conv = nn.Conv2d(16, 1, 3, 1, padding=1)
         self.weight_up = nn.Upsample(scale_factor=2, mode='nearest', align_corners=None)
 
     def forward(self, image, mask, z_code, sent_emb, word_embs, text_mask):
-
         out_c_t, att1, att2 = self.coarse_t(image, z_code, sent_emb, word_embs, text_mask)
         out_c_t = image * (1. - mask) + out_c_t * mask
 
         out_r_t = self.refine_t(out_c_t, image)
         out_r_t = image * (1. - mask) + out_r_t * mask
-        
-        attn_loss_add = torch.zeros_like(att2,dtype=torch.float)
+
+        attn_loss_add = torch.zeros_like(att2, dtype=torch.float)
         attn_loss_add = torch.cat([att2, attn_loss_add, attn_loss_add, attn_loss_add], 1)
         attn_loss_add = attn_loss_add[:, :16, :, :]
         attn_loss = self.weight_conv(attn_loss_add)
@@ -672,20 +690,20 @@ class PatchDiscriminator(nn.Module):
             nn.Conv2d(c_in, cnum, 4, 2, 1),
             get_act(act),
 
-            nn.Conv2d(cnum, cnum*2, 4, 2, 1),
-            get_norm(norm, cnum*2),
+            nn.Conv2d(cnum, cnum * 2, 4, 2, 1),
+            get_norm(norm, cnum * 2),
             get_act(act),
 
-            nn.Conv2d(cnum*2, cnum*4, 4, 2, 1),
-            get_norm(norm, cnum*4),
+            nn.Conv2d(cnum * 2, cnum * 4, 4, 2, 1),
+            get_norm(norm, cnum * 4),
             get_act(act),
 
-            nn.Conv2d(cnum*4, cnum*8, 4, 1, 1),
-            get_norm(norm, cnum*8),
+            nn.Conv2d(cnum * 4, cnum * 8, 4, 1, 1),
+            get_norm(norm, cnum * 8),
             get_act(act),
 
-            nn.Conv2d(cnum*8, 1, 4, 1, 1))
-    
+            nn.Conv2d(cnum * 8, 1, 4, 1, 1))
+
     def forward(self, x1, x2):
         x = torch.cat([x1, x2], 1)
         return self.discriminator(x)
